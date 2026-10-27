@@ -1,7 +1,7 @@
 # Order messaging lab (Go + RabbitMQ)
 
-This repository builds an order producer and, in later checkpoints, independent
-workers that consume from the same RabbitMQ queue.
+This repository builds an order producer and independent workers that consume
+from the same RabbitMQ queue.
 
 ## Checkpoint 1: broker and producer
 
@@ -52,12 +52,66 @@ To stop the broker, run `docker compose down`. This preserves its named volume
 and queued messages. Run `docker compose down -v` only when you intentionally
 want to reset the lab data.
 
-## Architecture (planned)
+## Checkpoint 2: two competing workers
+
+Start two independent worker processes in separate terminals:
+
+```powershell
+# Terminal A
+go run ./cmd/worker --id worker-a --delay 2s
+```
+
+```powershell
+# Terminal B
+go run ./cmd/worker --id worker-b --delay 2s
+```
+
+After both print `ready`, publish another batch from a third terminal:
+
+```powershell
+go run ./cmd/producer --count 5
+```
+
+Each worker requests one unacknowledged message at a time. It logs `received`,
+finishes the simulated order processing, and only then sends an ACK. Use Ctrl+C
+to stop the workers after processing has finished.
+
+This condensed log excerpt came from two separate worker processes consuming
+the five messages published in checkpoint 1. The event IDs are distinct across
+workers, and every `processed` line is followed by an `acked` line:
+
+```text
+worker-a:
+18:48:39 received event_id=c3536fff543ee6334485b8e0c2dc4694 redelivered=false
+18:48:41 processed event_id=c3536fff543ee6334485b8e0c2dc4694
+18:48:41 acked event_id=c3536fff543ee6334485b8e0c2dc4694
+18:48:41 received event_id=61ac996d52627c68954662c9e72315f7 redelivered=false
+18:48:43 processed event_id=61ac996d52627c68954662c9e72315f7
+18:48:43 acked event_id=61ac996d52627c68954662c9e72315f7
+18:48:43 received event_id=3a00d67c01a5353087e7c97d09a08f2b redelivered=false
+18:48:45 processed event_id=3a00d67c01a5353087e7c97d09a08f2b
+18:48:45 acked event_id=3a00d67c01a5353087e7c97d09a08f2b
+
+worker-b:
+18:48:40 received event_id=4be03aa85686c6fac4ce9f3ef3dbf94d redelivered=false
+18:48:42 processed event_id=4be03aa85686c6fac4ce9f3ef3dbf94d
+18:48:42 acked event_id=4be03aa85686c6fac4ce9f3ef3dbf94d
+18:48:42 received event_id=351f9d3c2467e3ceb3af3841089fbf0c redelivered=false
+18:48:44 processed event_id=351f9d3c2467e3ceb3af3841089fbf0c
+18:48:44 acked event_id=351f9d3c2467e3ceb3af3841089fbf0c
+
+After both workers stopped, RabbitMQ reported:
+$ docker compose exec -T rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers
+name    messages_ready    messages_unacknowledged    consumers
+orders  0                 0                          0
+```
+
+## Architecture
 
 ```text
 Order producer ──publish──> RabbitMQ orders queue ──deliver──> Worker A
                                               └────deliver──> Worker B
 ```
 
-The workers, manual acknowledgements, redelivery demo, duplicate handling, and
-captured evidence will be added in the next checkpoints.
+The controlled failure and redelivery demo, duplicate handling, and final
+reflection will be added in the next checkpoints.

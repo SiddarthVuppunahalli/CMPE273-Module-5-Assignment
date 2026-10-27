@@ -1,6 +1,8 @@
 # Local binaries and lab output
 /producer
 /worker
+/producer.exe
+/worker.exe
 /evidence/local/
 /.gomodcache/
 /.gocache/
