@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -27,9 +29,17 @@ func run() error {
 	workerID := flag.String("id", fmt.Sprintf("worker-%d", os.Getpid()), "name shown in logs")
 	delay := flag.Duration("delay", time.Second, "simulated processing time per order")
 	crashBeforeAck := flag.Bool("crash-before-ack", false, "exit on the first order after processing but before ACK (demo only)")
+	stateDir := flag.String("state-dir", ".order-state", "shared directory for processed event markers")
 	flag.Parse()
-	if strings.TrimSpace(*workerID) == "" || *delay < 0 {
-		return errors.New("id must be nonempty and delay must not be negative")
+	if strings.TrimSpace(*workerID) == "" || strings.TrimSpace(*stateDir) == "" || *delay < 0 {
+		return errors.New("id and state-dir must be nonempty and delay must not be negative")
+	}
+	statePath, err := filepath.Abs(*stateDir)
+	if err != nil {
+		return fmt.Errorf("resolve state directory: %w", err)
+	}
+	if err := os.MkdirAll(statePath, 0700); err != nil {
+		return fmt.Errorf("create state directory: %w", err)
 	}
 
 	url := os.Getenv("AMQP_URL")
@@ -62,7 +72,7 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	log.Printf("worker=%s ready queue=%s", *workerID, queue.Name)
+	log.Printf("worker=%s ready queue=%s state_dir=%s", *workerID, queue.Name, statePath)
 	for {
 		select {
 		case <-ctx.Done():
@@ -72,14 +82,14 @@ func run() error {
 			if !ok {
 				return errors.New("RabbitMQ delivery channel closed")
 			}
-			if err := handle(*workerID, *delay, *crashBeforeAck, delivery); err != nil {
+			if err := handle(*workerID, *delay, *crashBeforeAck, statePath, delivery); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func handle(workerID string, delay time.Duration, crashBeforeAck bool, delivery amqp.Delivery) error {
+func handle(workerID string, delay time.Duration, crashBeforeAck bool, stateDir string, delivery amqp.Delivery) error {
 	var event order.Event
 	if err := json.Unmarshal(delivery.Body, &event); err != nil || event.EventID == "" || event.OrderID == "" || event.ItemID == "" || event.Quantity < 1 {
 		log.Printf("worker=%s rejected invalid order: %s", workerID, delivery.Body)
@@ -90,8 +100,15 @@ func handle(workerID string, delay time.Duration, crashBeforeAck bool, delivery 
 	}
 
 	log.Printf("worker=%s received event_id=%s order_id=%s item_id=%s quantity=%d redelivered=%t", workerID, event.EventID, event.OrderID, event.ItemID, event.Quantity, delivery.Redelivered)
-	time.Sleep(delay) // Stand-in for completing the order business action.
-	log.Printf("worker=%s processed event_id=%s order_id=%s", workerID, event.EventID, event.OrderID)
+	processed, err := processOnce(stateDir, event.EventID, delay)
+	if err != nil {
+		return fmt.Errorf("process order %s: %w", event.EventID, err)
+	}
+	if processed {
+		log.Printf("worker=%s processed event_id=%s order_id=%s", workerID, event.EventID, event.OrderID)
+	} else {
+		log.Printf("worker=%s duplicate event_id=%s skipped=true", workerID, event.EventID)
+	}
 	if crashBeforeAck {
 		log.Printf("worker=%s simulated_crash event_id=%s before_ack=true", workerID, event.EventID)
 		os.Exit(2) // Abrupt exit leaves the delivery unacknowledged for RabbitMQ to requeue.
@@ -101,4 +118,28 @@ func handle(workerID string, delay time.Duration, crashBeforeAck bool, delivery 
 	}
 	log.Printf("worker=%s acked event_id=%s", workerID, event.EventID)
 	return nil
+}
+
+// Creating the marker is this lab's business action. O_EXCL makes it atomic
+// across worker processes, so only one worker can perform it for an event ID.
+func processOnce(stateDir, eventID string, delay time.Duration) (bool, error) {
+	marker := filepath.Join(stateDir, fmt.Sprintf("%x.done", sha256.Sum256([]byte(eventID))))
+	if _, err := os.Stat(marker); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+
+	time.Sleep(delay) // Simulate work before committing the business action.
+	file, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if errors.Is(err, os.ErrExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := file.Close(); err != nil {
+		return false, err
+	}
+	return true, nil
 }

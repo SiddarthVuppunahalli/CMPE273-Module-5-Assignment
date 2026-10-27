@@ -151,12 +151,62 @@ The broker stayed up, and worker B was still connected after ACK. At this
 checkpoint, both workers log `processed` for the same event; checkpoint 4 will
 prevent that duplicate business action.
 
-## Architecture
+## Checkpoint 4: idempotent order handling
 
-```text
-Order producer ──publish──> RabbitMQ orders queue ──deliver──> Worker A
-                                              └────deliver──> Worker B
+Run both workers from this repository folder so they share the default
+`.order-state` directory. For workers launched from different folders, pass
+the same absolute `--state-dir` path to each. Each marker file represents one
+completed business action. Its name is a SHA-256 hash of `event_id`, and its
+creation is atomic across worker processes. The marker is created after the
+simulated work finishes and before ACK. A redelivery or a second publish with
+the same `event_id` is logged as a duplicate and ACKed without another action.
+
+To reproduce the test, use a new event ID. Start worker A, publish one order,
+and start worker B after A logs `received`:
+
+```powershell
+# Terminal A
+go run ./cmd/worker --id worker-a --delay 25s --crash-before-ack
+
+# Producer terminal
+go run ./cmd/producer --count 1 --event-id idempotency-demo-1 --order-id order-idempotency-1 --item-id item-002 --quantity 3
+
+# Terminal B
+go run ./cmd/worker --id worker-b --delay 1s
 ```
 
-Duplicate handling and the final reflection will be added in the next
-checkpoints.
+After B ACKs the redelivery, run the same producer command again. The captured
+run shows exactly one `processed` action and two duplicate detections:
+
+```text
+2026/10/26 19:11:51 worker=worker-a received event_id=idempotency-demo-1 order_id=order-idempotency-1 item_id=item-002 quantity=3 redelivered=false
+2026/10/26 19:12:16 worker=worker-a processed event_id=idempotency-demo-1 order_id=order-idempotency-1
+2026/10/26 19:12:16 worker=worker-a simulated_crash event_id=idempotency-demo-1 before_ack=true
+
+2026/10/26 19:12:16 worker=worker-b received event_id=idempotency-demo-1 order_id=order-idempotency-1 item_id=item-002 quantity=3 redelivered=true
+2026/10/26 19:12:16 worker=worker-b duplicate event_id=idempotency-demo-1 skipped=true
+2026/10/26 19:12:16 worker=worker-b acked event_id=idempotency-demo-1
+
+2026/10/26 19:12:44 worker=worker-b received event_id=idempotency-demo-1 order_id=order-idempotency-1 item_id=item-002 quantity=3 redelivered=false
+2026/10/26 19:12:44 worker=worker-b duplicate event_id=idempotency-demo-1 skipped=true
+2026/10/26 19:12:44 worker=worker-b acked event_id=idempotency-demo-1
+
+Processed marker files: 1
+RabbitMQ orders queue: 0 ready, 0 unacknowledged
+```
+
+Marker files are local lab state and are intentionally ignored by Git. Use a
+fresh `event_id` for another run or remove `.order-state` to reset the demo.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    P[Order producer] --> Q[RabbitMQ orders queue]
+    Q --> A[Worker A]
+    Q --> B[Worker B]
+    A --> S[Shared .order-state markers]
+    B --> S
+```
+
+The final reflection and submission audit will be added in the next checkpoint.
