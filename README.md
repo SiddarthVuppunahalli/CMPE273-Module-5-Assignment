@@ -3,6 +3,17 @@
 This repository builds an order producer and independent workers that consume
 from the same RabbitMQ queue.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    P[Order producer] --> Q[RabbitMQ orders queue]
+    Q --> A[Worker A]
+    Q --> B[Worker B]
+    A --> S[Shared .order-state markers]
+    B --> S
+```
+
 ## Checkpoint 1: broker and producer
 
 Requirements: Go 1.22 or newer and Docker with Compose.
@@ -106,6 +117,11 @@ name    messages_ready    messages_unacknowledged    consumers
 orders  0                 0                          0
 ```
 
+
+![Two workers processing different orders](evidence/screenshots/competing-consumers.png)
+
+*Screenshot from a later run: each worker processes different event IDs.*
+
 ## Checkpoint 3: failure before ACK and redelivery
 
 Start with an empty queue and no workers. In terminal A, start the worker that
@@ -147,9 +163,15 @@ name    messages_ready    messages_unacknowledged    consumers
 orders  0                 0                          1
 ```
 
-The broker stayed up, and worker B was still connected after ACK. At this
-checkpoint, both workers log `processed` for the same event; checkpoint 4 will
-prevent that duplicate business action.
+The broker stayed up, and worker B was still connected after ACK. These logs
+were captured before duplicate handling was added, so both workers logged
+`processed` for the same event. With the final worker, the same steps still
+show `redelivered=true`, but B logs `duplicate` and skips processing.
+
+![Worker failure followed by redelivery to another worker](evidence/screenshots/redelivery.png)
+
+*Screenshot from a later run with duplicate handling enabled: worker A exits
+before ACK, and worker B receives the redelivery and skips the duplicate.*
 
 ## Checkpoint 4: idempotent order handling
 
@@ -198,15 +220,17 @@ RabbitMQ orders queue: 0 ready, 0 unacknowledged
 Marker files are local lab state and are intentionally ignored by Git. Use a
 fresh `event_id` for another run or remove `.order-state` to reset the demo.
 
-## Architecture
+![Duplicate order skipped and acknowledged](evidence/screenshots/duplicate-handling.png)
 
-```mermaid
-flowchart LR
-    P[Order producer] --> Q[RabbitMQ orders queue]
-    Q --> A[Worker A]
-    Q --> B[Worker B]
-    A --> S[Shared .order-state markers]
-    B --> S
-```
+*This screenshot reuses an already processed event ID, so both workers skip it.
+The log excerpt above shows the original processing and later duplicate checks.*
 
-The final reflection and submission audit will be added in the next checkpoint.
+## Reflection
+
+RabbitMQ redelivers an unacknowledged message when a worker's connection
+closes, so a crash after the work but before ACK can cause more than one
+delivery. In the failure run, worker A processed the order and exited before
+ACK, and worker B received the same `event_id` again. The worker checks a
+shared marker so a repeated event is logged and ACKed without repeating the
+lab's business action. For a real external side effect, the effect and its
+idempotency record would need to be coordinated atomically.
