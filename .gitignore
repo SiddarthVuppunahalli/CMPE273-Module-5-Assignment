@@ -1,0 +1,6 @@
+# Local binaries and lab output
+/producer
+/worker
+/evidence/local/
+/.gomodcache/
+/.gocache/
