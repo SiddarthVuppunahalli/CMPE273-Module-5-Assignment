@@ -26,6 +26,7 @@ func main() {
 func run() error {
 	workerID := flag.String("id", fmt.Sprintf("worker-%d", os.Getpid()), "name shown in logs")
 	delay := flag.Duration("delay", time.Second, "simulated processing time per order")
+	crashBeforeAck := flag.Bool("crash-before-ack", false, "exit on the first order after processing but before ACK (demo only)")
 	flag.Parse()
 	if strings.TrimSpace(*workerID) == "" || *delay < 0 {
 		return errors.New("id must be nonempty and delay must not be negative")
@@ -71,14 +72,14 @@ func run() error {
 			if !ok {
 				return errors.New("RabbitMQ delivery channel closed")
 			}
-			if err := handle(*workerID, *delay, delivery); err != nil {
+			if err := handle(*workerID, *delay, *crashBeforeAck, delivery); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func handle(workerID string, delay time.Duration, delivery amqp.Delivery) error {
+func handle(workerID string, delay time.Duration, crashBeforeAck bool, delivery amqp.Delivery) error {
 	var event order.Event
 	if err := json.Unmarshal(delivery.Body, &event); err != nil || event.EventID == "" || event.OrderID == "" || event.ItemID == "" || event.Quantity < 1 {
 		log.Printf("worker=%s rejected invalid order: %s", workerID, delivery.Body)
@@ -91,6 +92,10 @@ func handle(workerID string, delay time.Duration, delivery amqp.Delivery) error 
 	log.Printf("worker=%s received event_id=%s order_id=%s item_id=%s quantity=%d redelivered=%t", workerID, event.EventID, event.OrderID, event.ItemID, event.Quantity, delivery.Redelivered)
 	time.Sleep(delay) // Stand-in for completing the order business action.
 	log.Printf("worker=%s processed event_id=%s order_id=%s", workerID, event.EventID, event.OrderID)
+	if crashBeforeAck {
+		log.Printf("worker=%s simulated_crash event_id=%s before_ack=true", workerID, event.EventID)
+		os.Exit(2) // Abrupt exit leaves the delivery unacknowledged for RabbitMQ to requeue.
+	}
 	if err := delivery.Ack(false); err != nil {
 		return fmt.Errorf("acknowledge order %s: %w", event.EventID, err)
 	}

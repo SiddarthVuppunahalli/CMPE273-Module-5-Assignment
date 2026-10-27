@@ -106,6 +106,51 @@ name    messages_ready    messages_unacknowledged    consumers
 orders  0                 0                          0
 ```
 
+## Checkpoint 3: failure before ACK and redelivery
+
+Start with an empty queue and no workers. In terminal A, start the worker that
+will intentionally exit after processing its first order but before ACK:
+
+```powershell
+go run ./cmd/worker --id worker-a --delay 25s --crash-before-ack
+```
+
+After it prints `ready`, publish one identifiable event from another terminal:
+
+```powershell
+go run ./cmd/producer --count 1 --event-id redelivery-demo-1 --order-id order-redelivery-1 --item-id item-001 --quantity 2
+```
+
+Once worker A prints `received`, start worker B in another terminal:
+
+```powershell
+go run ./cmd/worker --id worker-b --delay 1s
+```
+
+Worker A's nonzero exit is intentional. RabbitMQ requeues its unacknowledged
+delivery, and worker B receives it. If B starts after A exits, it will still
+receive the queued message. This is the captured output from the run:
+
+```text
+2026/10/26 19:05:19 worker=worker-a received event_id=redelivery-demo-1 order_id=order-redelivery-1 item_id=item-001 quantity=2 redelivered=false
+2026/10/26 19:05:44 worker=worker-a processed event_id=redelivery-demo-1 order_id=order-redelivery-1
+2026/10/26 19:05:44 worker=worker-a simulated_crash event_id=redelivery-demo-1 before_ack=true
+
+2026/10/26 19:05:44 worker=worker-b received event_id=redelivery-demo-1 order_id=order-redelivery-1 item_id=item-001 quantity=2 redelivered=true
+2026/10/26 19:05:45 worker=worker-b processed event_id=redelivery-demo-1 order_id=order-redelivery-1
+2026/10/26 19:05:45 worker=worker-b acked event_id=redelivery-demo-1
+
+$ docker compose ps --services --status running
+rabbitmq
+$ docker compose exec -T rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged consumers
+name    messages_ready    messages_unacknowledged    consumers
+orders  0                 0                          1
+```
+
+The broker stayed up, and worker B was still connected after ACK. At this
+checkpoint, both workers log `processed` for the same event; checkpoint 4 will
+prevent that duplicate business action.
+
 ## Architecture
 
 ```text
@@ -113,5 +158,5 @@ Order producer ──publish──> RabbitMQ orders queue ──deliver──> W
                                               └────deliver──> Worker B
 ```
 
-The controlled failure and redelivery demo, duplicate handling, and final
-reflection will be added in the next checkpoints.
+Duplicate handling and the final reflection will be added in the next
+checkpoints.
